@@ -51,4 +51,72 @@ jobs:
           ninja -C build-native
           mkdir -p "$RUNNER_TEMP/clctools"
           for t in mesa_clc vtn_bindgen2 kk_clc; do
-            p=$(find build-native -type f -perm -u+x -name "$t"
+            p=$(find build-native -type f -perm -u+x -name "$t" | head -1)
+            test -n "$p" || { echo "FEHLT: $t"; exit 1; }
+            cp "$p" "$RUNNER_TEMP/clctools/"
+          done
+          ls -la "$RUNNER_TEMP/clctools"
+
+      - name: Stufe 2 - KosmicKrisp fuer x86_64
+        run: |
+          cat > cross-x86_64.ini <<'EOF'
+          [binaries]
+          c = ['/usr/bin/clang', '-arch', 'x86_64', '-mmacosx-version-min=26.0']
+          cpp = ['/usr/bin/clang++', '-arch', 'x86_64', '-mmacosx-version-min=26.0']
+          objc = ['/usr/bin/clang', '-arch', 'x86_64', '-mmacosx-version-min=26.0']
+          objcpp = ['/usr/bin/clang++', '-arch', 'x86_64', '-mmacosx-version-min=26.0']
+          ar = '/usr/bin/ar'
+          strip = '/usr/bin/strip'
+          pkg-config = '/usr/bin/false'
+
+          [host_machine]
+          system = 'darwin'
+          kernel = 'xnu'
+          cpu_family = 'x86_64'
+          cpu = 'x86_64'
+          endian = 'little'
+          EOF
+          export PATH="$RUNNER_TEMP/clctools:$RUNNER_TEMP/venv/bin:$PATH"
+          export MACOSX_DEPLOYMENT_TARGET=26.0
+          meson setup build-x64 mesa --cross-file cross-x86_64.ini --buildtype=release \
+            -Dplatforms=macos -Dvulkan-drivers=kosmickrisp -Dgallium-drivers= \
+            -Dopengl=false -Dglx=disabled -Degl=disabled -Dgbm=disabled \
+            -Dgles1=disabled -Dgles2=disabled -Dzstd=disabled \
+            -Dmesa-clc=system -Dprecomp-compiler=system \
+            -Dllvm=disabled -Dspirv-tools=disabled -Dxmlconfig=disabled -Dexpat=disabled \
+            --prefer-static
+          ninja -C build-x64 src/kosmickrisp/vulkan/libvulkan_kosmickrisp.dylib
+
+      - name: Paket schnueren
+        run: |
+          mkdir -p out
+          cp build-x64/src/kosmickrisp/vulkan/libvulkan_kosmickrisp.dylib out/
+          lipo -info out/libvulkan_kosmickrisp.dylib
+          otool -L out/libvulkan_kosmickrisp.dylib
+          nm -gU out/libvulkan_kosmickrisp.dylib | grep vk_icd
+          cat > out/kosmickrisp_icd_x86_64.json <<'EOF'
+          {
+              "file_format_version": "1.0.0",
+              "ICD": {
+                  "library_path": "./libvulkan_kosmickrisp.dylib",
+                  "api_version": "1.4.0"
+              }
+          }
+          EOF
+          cp mesa.sha256 out/
+          echo "Mesa ${MESA_VER}, gebaut $(date -u +%F) auf $(sw_vers -productVersion), Xcode $(xcodebuild -version | head -1)" > out/BUILDINFO.txt
+          shasum -a 256 out/libvulkan_kosmickrisp.dylib >> out/BUILDINFO.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kosmickrisp-x86_64
+          path: out/
+
+      - name: Logs bei Fehler sichern
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            build-native/meson-logs/
+            build-x64/meson-logs/
