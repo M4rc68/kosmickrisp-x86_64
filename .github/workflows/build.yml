@@ -1,0 +1,54 @@
+name: KosmicKrisp x86_64
+
+# Baut Mesas Vulkan-Treiber KosmicKrisp als x86_64-dylib, damit CrossOver
+# (Wine unter Rosetta 2) ihn laden kann. Nur unveraenderter Mesa-Quellcode.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mesa_version:
+        description: "Mesa-Tag ohne Praefix, z. B. 26.2.5"
+        required: true
+        default: "26.2.5"
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 120
+    env:
+      MESA_VER: ${{ github.event.inputs.mesa_version }}
+    steps:
+      - name: Umgebung anzeigen
+        run: |
+          sw_vers
+          xcodebuild -version
+          xcrun --show-sdk-version
+          uname -m
+          /usr/bin/arch -x86_64 /usr/bin/true && echo "Rosetta vorhanden" || echo "Rosetta fehlt"
+
+      - name: Werkzeuge installieren
+        run: |
+          brew install meson ninja llvm libclc spirv-llvm-translator spirv-tools pkgconf
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install mako packaging pyyaml
+
+      - name: Mesa laden
+        run: |
+          curl -fsSL -o mesa.tar.gz "https://gitlab.freedesktop.org/mesa/mesa/-/archive/mesa-${MESA_VER}/mesa-mesa-${MESA_VER}.tar.gz"
+          tar -xzf mesa.tar.gz
+          mv "mesa-mesa-${MESA_VER}" mesa
+          shasum -a 256 mesa.tar.gz | tee mesa.sha256
+
+      - name: Stufe 1 - native Hilfscompiler (arm64)
+        run: |
+          export PATH="$RUNNER_TEMP/venv/bin:$PATH:$(brew --prefix llvm)/bin"
+          meson setup build-native mesa --buildtype=release \
+            -Dplatforms=macos -Dvulkan-drivers=kosmickrisp -Dgallium-drivers= \
+            -Dopengl=false -Dglx=disabled -Degl=disabled -Dgbm=disabled \
+            -Dgles1=disabled -Dgles2=disabled -Dzstd=disabled \
+            -Dmesa-clc=enabled -Dinstall-mesa-clc=true \
+            -Dprecomp-compiler=enabled -Dinstall-precomp-compiler=true
+          ninja -C build-native
+          mkdir -p "$RUNNER_TEMP/clctools"
+          for t in mesa_clc vtn_bindgen2 kk_clc; do
+            p=$(find build-native -type f -perm -u+x -name "$t"
